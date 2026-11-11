@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gdt</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+:root {
+  --bg: #ffffff; --bg2: #f6f8fa; --fg: #1f2328; --muted: #656d76; --border: #d0d7de;
+  --sel: #0969da; --sel-fg: #ffffff; --hover: #eaeef2;
+  --add-bg: #e6ffec; --add-gut: #ccffd8; --add-mark: #abf2bc;
+  --del-bg: #ffebe9; --del-gut: #ffd7d5; --del-mark: rgba(255,129,130,.45);
+  --hunk-bg: #ddf4ff; --hunk-fg: #57606a;
+  --c-add: #1a7f37; --c-del: #cf222e; --c-mod: #9a6700; --c-ren: #0969da;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --fg: #e6edf3; --muted: #8d96a0; --border: #30363d;
+    --sel: #1f6feb; --sel-fg: #ffffff; --hover: #1c2129;
+    --add-bg: rgba(46,160,67,.15); --add-gut: rgba(63,185,80,.3); --add-mark: rgba(46,160,67,.4);
+    --del-bg: rgba(248,81,73,.1); --del-gut: rgba(248,81,73,.3); --del-mark: rgba(248,81,73,.4);
+    --hunk-bg: rgba(56,139,253,.15); --hunk-fg: #8d96a0;
+    --c-add: #3fb950; --c-del: #f85149; --c-mod: #d29922; --c-ren: #58a6ff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+header { padding: 10px 16px; border-bottom: 1px solid var(--border); flex: none; }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+header .body { margin-top: 6px; padding: 6px 8px; background: var(--bg2); border-radius: 4px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-height: 80px; overflow: auto; }
+header .meta { margin-top: 6px; color: var(--muted); display: flex; gap: 14px; align-items: center; }
+header .meta code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+header .totals { margin-left: auto; font-weight: 600; }
+.plus { color: var(--c-add); } .minus { color: var(--c-del); }
+main { flex: 1; display: grid; grid-template-columns: var(--side, 380px) 4px 1fr; min-height: 0; }
+#side { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+#side .count { padding: 7px; text-align: center; border-bottom: 1px solid var(--border); background: var(--bg2); flex: none; }
+#list { overflow: auto; flex: 1; outline: none; }
+.item { display: flex; align-items: center; gap: 8px; padding: 0 10px; height: 29px; cursor: default;
+  border-bottom: 1px solid var(--border); white-space: nowrap; }
+.item:hover { background: var(--hover); }
+.item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.item .name bdi { direction: ltr; }
+.item .dir { color: var(--muted); }
+.item .arrow { color: var(--muted); margin: 0 4px; }
+.item.sel { background: var(--sel); color: var(--sel-fg); }
+.item.sel .dir, .item.sel .arrow { color: var(--sel-fg); opacity: .8; }
+.st { flex: none; width: 14px; height: 14px; border: 1.5px solid currentColor; border-radius: 3px;
+  display: grid; place-items: center; font: bold 11px/1 ui-monospace, Menlo, monospace; }
+.st-M { color: var(--c-mod); } .st-M::after { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.st-A { color: var(--c-add); } .st-A::after { content: "+"; }
+.st-D { color: var(--c-del); } .st-D::after { content: "\2212"; }
+.st-R, .st-C { color: var(--c-ren); } .st-R::after, .st-C::after { content: "\2192"; }
+.item.sel .st { color: var(--sel-fg); }
+#drag { cursor: col-resize; }
+#drag:hover { background: var(--border); }
+#pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#bar { display: flex; align-items: center; gap: 12px; padding: 7px 14px; border-bottom: 1px solid var(--border);
+  background: var(--bg2); flex: none; }
+#bar .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bar label { color: var(--muted); display: flex; gap: 4px; align-items: center; user-select: none; }
+#diff { flex: 1; overflow: auto; }
+table { border-collapse: collapse; font: 12px/20px ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 100%; }
+td { padding: 0; vertical-align: top; }
+td.n { width: 1%; min-width: 50px; padding: 0 10px; text-align: right; color: var(--muted); user-select: none; }
+td.s { width: 22px; text-align: center; user-select: none; color: var(--muted); }
+td.c { white-space: pre; padding-right: 20px; }
+.wrap td.c { white-space: pre-wrap; word-break: break-all; }
+tr.a td { background: var(--add-bg); } tr.a td.n { background: var(--add-gut); }
+tr.d td { background: var(--del-bg); } tr.d td.n { background: var(--del-gut); }
+tr.h td { background: var(--hunk-bg); color: var(--hunk-fg); }
+tr.x td.c { color: var(--muted); font-style: italic; }
+tr.a mark { background: var(--add-mark); color: inherit; border-radius: 2px; }
+tr.d mark { background: var(--del-mark); color: inherit; border-radius: 2px; }
+.live { color: var(--c-add); font-weight: 600; }
+.live.off { color: var(--muted); }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header id="hdr"></header>
+<main>
+  <div id="side"><div class="count" id="count"></div><div id="list" tabindex="0"></div></div>
+  <div id="drag"></div>
+  <div id="pane">
+    <div id="bar"><span class="path" id="path"></span><span id="ftot"></span>
+      <label><input type="checkbox" id="wrap"> Wrap</label></div>
+    <div id="diff"></div>
+  </div>
+</main>
+<script>
+let DATA = null, files = [], selected = 0;
+
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ---------- header ----------
+function renderHeader() {
+  const add = files.reduce((n, f) => n + f.add, 0), del = files.reduce((n, f) => n + f.del, 0);
+  let h = `<h1>${esc(DATA.title)}</h1>`;
+  if (DATA.body) h += `<div class="body">${esc(DATA.body)}</div>`;
+  h += `<div class="meta">`;
+  if (DATA.mode === "commit") h += `<span>${esc(DATA.author)}</span><span>${esc(DATA.date)}</span><code>${DATA.sha.slice(0, 9)}</code>`;
+  h += `<span>${esc(DATA.repo)}</span><span>⎇ ${esc(DATA.branch)}</span>`;
+  if (DATA.live) h += `<span class="live" id="live" title="Updates automatically when files change">● Live</span>`;
+  h += `<span class="totals"><span class="plus">+${add}</span> <span class="minus">−${del}</span></span></div>`;
+  document.getElementById("hdr").innerHTML = h;
+  document.title = `${DATA.repo} — ${DATA.title}`;
+  document.getElementById("count").textContent = `${files.length} changed file${files.length === 1 ? "" : "s"}`;
+}
+
+// ---------- file list ----------
+function pathHtml(p) {
+  const i = p.lastIndexOf("/");
+  return i < 0 ? esc(p) : `<span class="dir">${esc(p.slice(0, i + 1))}</span>${esc(p.slice(i + 1))}`;
+}
+const list = document.getElementById("list");
+function renderList() {
+list.innerHTML = files.map((f, i) => {
+  const name = f.oldPath ? `${pathHtml(f.oldPath)}<span class="arrow">→</span>${pathHtml(f.path)}` : pathHtml(f.path);
+  return `<div class="item" data-i="${i}" title="${esc(f.path)}"><span class="name"><bdi>${name}</bdi></span><span class="st st-${f.status}"></span></div>`;
+}).join("");
+}
+list.addEventListener("click", e => { const it = e.target.closest(".item"); if (it) select(+it.dataset.i); });
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); select(Math.min(files.length - 1, selected + 1)); }
+  if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); select(Math.max(0, selected - 1)); }
+  if (e.key === "w") { const w = document.getElementById("wrap"); w.checked = !w.checked; applyWrap(); }
+});
+
+// ---------- syntax highlighting ----------
+const LANG = { php: "php", js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+  ts: "typescript", tsx: "typescript", py: "python", rb: "ruby", go: "go", rs: "rust", java: "java",
+  kt: "kotlin", swift: "swift", c: "c", h: "c", cpp: "cpp", hpp: "cpp", cc: "cpp", cs: "csharp",
+  css: "css", scss: "scss", less: "less", html: "xml", htm: "xml", xml: "xml", vue: "xml", twig: "xml",
+  svg: "xml", yml: "yaml", yaml: "yaml", json: "json", md: "markdown", sh: "bash", bash: "bash",
+  zsh: "bash", sql: "sql", ini: "ini", toml: "ini", env: "bash", dockerfile: "dockerfile",
+  makefile: "makefile", graphql: "graphql", lua: "lua", pl: "perl", r: "r", dart: "dart", scala: "scala" };
+function langFor(path) {
+  const base = path.split("/").pop().toLowerCase();
+  if (base.startsWith(".env")) return "bash";
+  const ext = base.includes(".") ? base.split(".").pop() : base;
+  const l = LANG[ext];
+  return l && window.hljs && hljs.getLanguage(l) ? l : null;
+}
+function highlight(text, lang) {
+  if (!lang) return esc(text);
+  try { return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value; }
+  catch (e) { return esc(text); }
+}
+// Split highlighted HTML into lines, closing/reopening spans across line breaks.
+function splitLines(html) {
+  const out = [], stack = [], re = /(<span[^>]*>)|(<\/span>)|(\n)|([^<\n]+)/g;
+  let cur = "", m;
+  while ((m = re.exec(html))) {
+    if (m[1]) { stack.push(m[1]); cur += m[1]; }
+    else if (m[2]) { stack.pop(); cur += m[2]; }
+    else if (m[3]) { cur += "</span>".repeat(stack.length); out.push(cur); cur = stack.join(""); }
+    else cur += m[4];
+  }
+  out.push(cur);
+  return out;
+}
+// Wrap visible characters [s, e) of an HTML string in <mark>, respecting tags.
+function markRange(html, s, e) {
+  if (s >= e) return html;
+  let out = "", pos = 0, open = false, i = 0;
+  while (i < html.length) {
+    if (pos === s && !open) { out += "<mark>"; open = true; }
+    if (pos === e && open) { out += "</mark>"; open = false; }
+    const c = html[i];
+    if (c === "<") { const j = html.indexOf(">", i); const tag = html.slice(i, j + 1); out += open ? `</mark>${tag}<mark>` : tag; i = j + 1; continue; }
+    if (c === "&") { const j = html.indexOf(";", i); out += html.slice(i, j + 1); i = j + 1; pos++; continue; }
+    out += c; i++; pos++;
+  }
+  if (open) out += "</mark>";
+  return out;
+}
+function changedRange(a, b) {
+  let p = 0; const max = Math.min(a.length, b.length);
+  while (p < max && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < max - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  if (p + s < 3) return null;
+  return [[p, a.length - s], [p, b.length - s]];
+}
+
+// ---------- diff rendering ----------
+function renderHunk(h, lang) {
+  const L = h.lines;
+  const oldSide = [], newSide = [];
+  for (const l of L) { if (l[0] === " " || l[0] === "-") oldSide.push(l[3]); if (l[0] === " " || l[0] === "+") newSide.push(l[3]); }
+  const oldHtml = splitLines(highlight(oldSide.join("\n"), lang));
+  const newHtml = splitLines(highlight(newSide.join("\n"), lang));
+  const htmls = new Array(L.length);
+  let oi = 0, ni = 0;
+  for (let i = 0; i < L.length; i++) {
+    const t = L[i][0];
+    if (t === " ") { htmls[i] = newHtml[ni++]; oi++; }
+    else if (t === "-") htmls[i] = oldHtml[oi++];
+    else if (t === "+") htmls[i] = newHtml[ni++];
+    else htmls[i] = esc(L[i][3]);
+  }
+  // intra-line highlights: pair runs of deletions with following additions
+  for (let i = 0; i < L.length;) {
+    if (L[i][0] !== "-") { i++; continue; }
+    let d = i; while (d < L.length && L[d][0] === "-") d++;
+    let a = d; while (a < L.length && L[a][0] === "+") a++;
+    const n = Math.min(d - i, a - d);
+    for (let k = 0; k < n; k++) {
+      const r = changedRange(L[i + k][3], L[d + k][3]);
+      if (!r) continue;
+      htmls[i + k] = markRange(htmls[i + k], r[0][0], r[0][1]);
+      htmls[d + k] = markRange(htmls[d + k], r[1][0], r[1][1]);
+    }
+    i = a;
+  }
+  let out = `<tr class="h"><td class="n"></td><td class="n"></td><td class="s"></td><td class="c">${esc(h.header)}</td></tr>`;
+  for (let i = 0; i < L.length; i++) {
+    const [t, o, nn] = L[i];
+    const cls = t === "+" ? "a" : t === "-" ? "d" : t === "\\" ? "x" : "";
+    out += `<tr class="${cls}"><td class="n">${o ?? ""}</td><td class="n">${nn ?? ""}</td><td class="s">${t === "\\" ? "" : t.trim()}</td><td class="c">${htmls[i]}</td></tr>`;
+  }
+  return out;
+}
+function select(i, keepScroll) {
+  const d = document.getElementById("diff");
+  if (!files.length) {
+    document.getElementById("path").textContent = "";
+    document.getElementById("ftot").innerHTML = "";
+    d.innerHTML = `<div class="empty">No changes</div>`;
+    return;
+  }
+  const top = d.scrollTop, left = d.scrollLeft;
+  selected = i;
+  list.querySelectorAll(".item.sel").forEach(e => e.classList.remove("sel"));
+  const it = list.children[i]; it.classList.add("sel"); it.scrollIntoView({ block: "nearest" });
+  const f = files[i];
+  document.getElementById("path").innerHTML = f.oldPath ? `${esc(f.oldPath)} → ${esc(f.path)}` : esc(f.path);
+  document.getElementById("ftot").innerHTML = `<span class="plus">+${f.add}</span> <span class="minus">−${f.del}</span>`;
+  if (f.binary) d.innerHTML = `<div class="empty">Binary file — not shown</div>`;
+  else if (f.note) d.innerHTML = `<div class="empty">${esc(f.note)}</div>`;
+  else if (!f.hunks.length) d.innerHTML = `<div class="empty">${f.status === "R" ? "File renamed without changes" : "No content changes (mode change or empty file)"}</div>`;
+  else {
+    const total = f.hunks.reduce((n, h) => n + h.lines.length, 0);
+    const lang = total > 20000 ? null : langFor(f.path);
+    d.innerHTML = `<table>${f.hunks.map(h => renderHunk(h, lang)).join("")}</table>`;
+  }
+  if (keepScroll) { d.scrollTop = top; d.scrollLeft = left; } else { d.scrollTop = 0; d.scrollLeft = 0; }
+}
+function applyWrap() { document.getElementById("diff").classList.toggle("wrap", document.getElementById("wrap").checked); }
+document.getElementById("wrap").addEventListener("change", applyWrap);
+
+// ---------- resizable sidebar ----------
+document.getElementById("drag").addEventListener("mousedown", e => {
+  e.preventDefault();
+  const move = ev => document.querySelector("main").style.setProperty("--side", Math.max(200, Math.min(ev.clientX, innerWidth - 300)) + "px");
+  const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
+  addEventListener("mousemove", move); addEventListener("mouseup", up);
+});
+
+// ---------- data loading / live updates ----------
+async function refresh() {
+  const res = await fetch("api/data", { cache: "no-store" });
+  if (!res.ok) return;
+  const prevPath = files[selected] && files[selected].path;
+  DATA = await res.json();
+  files = DATA.files;
+  renderHeader();
+  renderList();
+  const i = files.findIndex(f => f.path === prevPath);
+  select(i >= 0 ? i : Math.max(0, Math.min(selected, files.length - 1)), i >= 0);
+}
+refresh().then(() => list.focus());
+const events = new EventSource("api/events");
+events.onmessage = () => refresh();
+events.onerror = () => { const l = document.getElementById("live"); if (l) { l.classList.add("off"); l.textContent = "● Disconnected"; } };
+events.onopen = () => { const l = document.getElementById("live"); if (l) { l.classList.remove("off"); l.textContent = "● Live"; } };
+</script>
+</body>
+</html>

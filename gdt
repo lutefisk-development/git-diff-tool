@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""gdt - visual git diff viewer (read-only).
+
+Usage:
+  gdt                 uncommitted changes (staged + unstaged + untracked) vs HEAD
+  gdt <commit>        changes introduced by a commit (vs its first parent)
+  gdt <a>..<b>        changes between two revisions
+
+The window updates live when files change (working-tree mode). The background
+server exits ~30s after the window is closed.
+
+Options:
+  --no-open           print the URL instead of opening a window
+  --foreground        don't detach (Ctrl+C to stop)
+
+Env:
+  GDT_BROWSER=default   open in the default browser instead of a Chrome app window
+"""
+import http.server
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+MAX_UNTRACKED_BYTES = 2 * 1024 * 1024
+IDLE_EXIT_SECONDS = 30
+HERE = os.path.dirname(os.path.realpath(__file__))
+DIFF_OPTS = [
+    "-M", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/",
+]
+
+
+def git(*args, check=True):
+    p = subprocess.run(
+        ["git", "-c", "core.quotepath=false"] + list(args),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if check and p.returncode != 0:
+        raise RuntimeError(p.stderr.decode("utf-8", "replace").strip())
+    return p.stdout.decode("utf-8", "replace")
+
+
+def unquote(p):
+    if len(p) >= 2 and p[0] == '"' and p[-1] == '"':
+        p = p[1:-1]
+        try:
+            p = p.encode("latin1", "backslashreplace").decode("unicode_escape") \
+                 .encode("latin1").decode("utf-8", "replace")
+        except Exception:
+            pass
+    return p
+
+
+def strip_prefix(p):
+    p = unquote(p.rstrip("\t"))
+    return p[2:] if p[:2] in ("a/", "b/") else p
+
+
+def path_from_header(hdr):
+    # "a/P b/P" (identical paths when not a rename)
+    n = (len(hdr) - 5) // 2
+    if n > 0 and hdr[:2] == "a/" and hdr[2 + n:2 + n + 3] == " b/":
+        return hdr[2:2 + n]
+    parts = hdr.split(" b/", 1)
+    return strip_prefix(parts[0])
+
+
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$")
+
+
+def parse_patch(text):
+    files = []
+    cur = hunk = None
+    in_header = False
+    old_no = new_no = 0
+    for line in text.split("\n"):
+        if line.startswith("diff --git "):
+            cur = {"path": None, "oldPath": None, "status": "M", "binary": False,
+                   "hunks": [], "_hdr": line[11:]}
+            files.append(cur)
+            hunk = None
+            in_header = True
+            continue
+        if cur is None:
+            continue
+        if in_header and not line.startswith("@@"):
+            if line.startswith("new file mode"):
+                cur["status"] = "A"
+            elif line.startswith("deleted file mode"):
+                cur["status"] = "D"
+            elif line.startswith("rename from "):
+                cur["status"], cur["oldPath"] = "R", unquote(line[12:])
+            elif line.startswith("rename to "):
+                cur["path"] = unquote(line[10:])
+            elif line.startswith("copy from "):
+                cur["status"], cur["oldPath"] = "C", unquote(line[10:])
+            elif line.startswith("copy to "):
+                cur["path"] = unquote(line[8:])
+            elif line.startswith("--- "):
+                if line[4:] != "/dev/null":
+                    cur["oldPath"] = strip_prefix(line[4:])
+            elif line.startswith("+++ "):
+                if line[4:] != "/dev/null":
+                    cur["path"] = strip_prefix(line[4:])
+            elif line.startswith("Binary files"):
+                cur["binary"] = True
+            continue
+        in_header = False
+        if line.startswith("@@"):
+            m = HUNK_RE.match(line)
+            if not m:
+                continue
+            old_no, new_no = int(m.group(1)), int(m.group(2))
+            hunk = {"header": line, "lines": []}
+            cur["hunks"].append(hunk)
+        elif hunk is None or line == "":
+            continue
+        elif line.startswith("\\"):
+            hunk["lines"].append(["\\", None, None, line[2:]])
+        else:
+            t, s = line[0], line[1:]
+            if t == "+":
+                hunk["lines"].append(["+", None, new_no, s])
+                new_no += 1
+            elif t == "-":
+                hunk["lines"].append(["-", old_no, None, s])
+                old_no += 1
+            else:
+                hunk["lines"].append([" ", old_no, new_no, s])
+                old_no += 1
+                new_no += 1
+
+    for f in files:
+        hdr = f.pop("_hdr")
+        if f["path"] is None:
+            f["path"] = f["oldPath"] or path_from_header(hdr)
+        if f["status"] not in ("R", "C"):
+            f["oldPath"] = None
+    return files
+
+
+def untracked_file(root, rel):
+    f = {"path": rel, "oldPath": None, "status": "A", "binary": False, "hunks": []}
+    full = os.path.join(root, rel)
+    try:
+        if os.path.isdir(full) or os.path.getsize(full) > MAX_UNTRACKED_BYTES:
+            f["note"] = "File too large to display"
+            return f
+        with open(full, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        f["note"] = str(e)
+        return f
+    if b"\0" in data[:8000]:
+        f["binary"] = True
+        return f
+    text = data.decode("utf-8", "replace")
+    if not text:
+        return f
+    lines = text.split("\n")
+    no_eol = lines[-1] != ""
+    if not no_eol:
+        lines.pop()
+    hunk = {"header": "@@ -0,0 +1,%d @@" % len(lines),
+            "lines": [["+", None, i + 1, s] for i, s in enumerate(lines)]}
+    if no_eol:
+        hunk["lines"].append(["\\", None, None, "No newline at end of file"])
+    f["hunks"].append(hunk)
+    return f
+
+
+def collect(root, rev):
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", check=False).strip() or "(no branch)"
+    info = {"repo": os.path.basename(root), "root": root, "branch": branch}
+
+    if rev is None:
+        has_head = git("rev-parse", "--verify", "-q", "HEAD", check=False).strip() != ""
+        base = "HEAD" if has_head else EMPTY_TREE
+        files = parse_patch(git("diff", *DIFF_OPTS, base))
+        untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        files += [untracked_file(root, p) for p in untracked if p]
+        info["mode"] = "working"
+        info["title"] = "Uncommitted changes"
+    elif ".." in rev:
+        files = parse_patch(git("diff", *DIFF_OPTS, rev))
+        info["mode"] = "range"
+        info["title"] = rev
+    else:
+        sha = git("rev-parse", "--verify", rev + "^{commit}").strip()
+        parent = git("rev-parse", "--verify", "-q", sha + "^", check=False).strip() or EMPTY_TREE
+        files = parse_patch(git("diff", *DIFF_OPTS, parent, sha))
+        meta = git("log", "-1", "--format=%an%x00%ad%x00%s%x00%b", "--date=format:%Y-%m-%d %H:%M", sha)
+        author, date, subject, body = (meta.split("\0") + ["", "", "", ""])[:4]
+        info.update({"mode": "commit", "sha": sha, "author": author, "date": date,
+                     "title": subject, "body": body.strip()})
+
+    for f in files:
+        f["add"] = sum(1 for h in f["hunks"] for l in h["lines"] if l[0] == "+")
+        f["del"] = sum(1 for h in f["hunks"] for l in h["lines"] if l[0] == "-")
+    files.sort(key=lambda f: f["path"].lower())
+    info["files"] = files
+    return info
+
+
+def fingerprint():
+    """Cheap signature of the working tree state; changes when anything diff-relevant changes."""
+    parts = [git("rev-parse", "-q", "--verify", "HEAD", check=False)]
+    st = git("--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", check=False)
+    parts.append(st)
+    for tok in st.split("\0"):
+        if len(tok) > 3:
+            try:
+                s = os.stat(tok[3:])
+                parts.append("%s:%d:%d" % (tok[3:], s.st_mtime_ns, s.st_size))
+            except OSError:
+                pass
+    return hash("\0".join(parts))
+
+
+class State:
+    def __init__(self, root, rev):
+        self.root, self.rev = root, rev
+        self.version = 0
+        self.cond = threading.Condition()
+        self.clients = 0
+        self.idle_since = time.time()
+        self.cache = None
+        self.lock = threading.Lock()
+
+    def data(self):
+        with self.lock:
+            if self.cache is None or self.cache[0] != self.version:
+                info = collect(self.root, self.rev)
+                info["live"] = self.rev is None
+                self.cache = (self.version, json.dumps(info, ensure_ascii=False).encode("utf-8"))
+            return self.cache[1]
+
+    def bump(self):
+        with self.cond:
+            self.version += 1
+            self.cond.notify_all()
+
+
+def make_handler(state, port):
+    with open(os.path.join(HERE, "template.html"), "rb") as fh:
+        page = fh.read()
+    allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, ctype, body):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.headers.get("Host") not in allowed_hosts:
+                return self.send(403, "text/plain", b"forbidden")
+            if self.path == "/":
+                return self.send(200, "text/html; charset=utf-8", page)
+            if self.path == "/api/data":
+                try:
+                    return self.send(200, "application/json", state.data())
+                except RuntimeError as e:
+                    return self.send(500, "text/plain", str(e).encode())
+            if self.path == "/api/events":
+                return self.events()
+            self.send(404, "text/plain", b"not found")
+
+        def events(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with state.cond:
+                state.clients += 1
+                seen = state.version
+            try:
+                while True:
+                    with state.cond:
+                        state.cond.wait(5)
+                        v = state.version
+                    if v != seen:
+                        seen = v
+                        self.wfile.write(b"data: %d\n\n" % v)
+                    else:
+                        self.wfile.write(b": ping\n\n")  # detects closed windows
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                with state.cond:
+                    state.clients -= 1
+                    state.idle_since = time.time()
+
+    return Handler
+
+
+def watch(state, server):
+    last = fingerprint() if state.rev is None else None
+    while True:
+        time.sleep(1)
+        with state.cond:
+            idle = state.clients == 0 and time.time() - state.idle_since > IDLE_EXIT_SECONDS
+        if idle:
+            server.shutdown()
+            return
+        if state.rev is None:
+            fp = fingerprint()
+            if fp != last:
+                last = fp
+                state.bump()
+
+
+def open_window(url):
+    pref = os.environ.get("GDT_BROWSER", "auto")
+    app_args = ["--app=" + url, "--window-size=1500,950"]
+    if sys.platform == "darwin":
+        if pref != "default":
+            for app in ("Google Chrome", "Brave Browser", "Microsoft Edge", "Chromium"):
+                if os.path.isdir("/Applications/%s.app" % app):
+                    subprocess.run(["open", "-na", app, "--args"] + app_args)
+                    return
+        subprocess.run(["open", url])
+    else:
+        if pref != "default":
+            for exe in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
+                if subprocess.run(["which", exe], stdout=subprocess.DEVNULL).returncode == 0:
+                    subprocess.Popen([exe] + app_args, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    return
+        subprocess.Popen(["xdg-open", url])
+
+
+def main(argv):
+    foreground = "--foreground" in argv
+    no_open = "--no-open" in argv
+    args = [a for a in argv if a not in ("--foreground", "--no-open")]
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    rev = args[0] if args else None
+    try:
+        root = git("rev-parse", "--show-toplevel").strip()
+    except RuntimeError:
+        print("gdt: not inside a git repository", file=sys.stderr)
+        return 1
+    os.chdir(root)
+    state = State(root, rev)
+    try:
+        state.data()  # fail early on bad revisions
+    except RuntimeError as e:
+        print("gdt: %s" % e, file=sys.stderr)
+        return 1
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), None)
+    server.daemon_threads = True
+    port = server.server_address[1]
+    server.RequestHandlerClass = make_handler(state, port)
+    url = "http://127.0.0.1:%d/" % port
+
+    if not foreground and os.fork() != 0:
+        # parent: open the window and give the terminal back
+        if no_open:
+            print(url)
+        else:
+            open_window(url)
+        return 0
+    if not foreground:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+    elif no_open:
+        print(url, flush=True)
+    else:
+        open_window(url)
+
+    threading.Thread(target=watch, args=(state, server), daemon=True).start()
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
