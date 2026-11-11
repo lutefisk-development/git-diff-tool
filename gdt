@@ -24,10 +24,15 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import parse_qs, urlsplit
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 MAX_UNTRACKED_BYTES = 2 * 1024 * 1024
 IDLE_EXIT_SECONDS = 30
+LOG_PAGE = 100
+COMMIT_CACHE = 30
+SHA_RE = re.compile(r"^[0-9a-f]{4,40}$")
+TRAILERS = "%(trailers:key=Co-authored-by,valueonly,separator=%x1d)"
 HERE = os.path.dirname(os.path.realpath(__file__))
 DIFF_OPTS = [
     "-M", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/",
@@ -175,7 +180,8 @@ def untracked_file(root, rel):
 
 def collect(root, rev):
     branch = git("rev-parse", "--abbrev-ref", "HEAD", check=False).strip() or "(no branch)"
-    info = {"repo": os.path.basename(root), "root": root, "branch": branch}
+    head = git("rev-parse", "-q", "--verify", "HEAD", check=False).strip()
+    info = {"repo": os.path.basename(root), "root": root, "branch": branch, "head": head}
 
     if rev is None:
         has_head = git("rev-parse", "--verify", "-q", "HEAD", check=False).strip() != ""
@@ -193,10 +199,11 @@ def collect(root, rev):
         sha = git("rev-parse", "--verify", rev + "^{commit}").strip()
         parent = git("rev-parse", "--verify", "-q", sha + "^", check=False).strip() or EMPTY_TREE
         files = parse_patch(git("diff", *DIFF_OPTS, parent, sha))
-        meta = git("log", "-1", "--format=%an%x00%ad%x00%s%x00%b", "--date=format:%Y-%m-%d %H:%M", sha)
-        author, date, subject, body = (meta.split("\0") + ["", "", "", ""])[:4]
-        info.update({"mode": "commit", "sha": sha, "author": author, "date": date,
-                     "title": subject, "body": body.strip()})
+        meta = git("log", "-1", "--format=%an%x00%cn%x00" + TRAILERS + "%x00%ad%x00%s%x00%b",
+                   "--date=format:%Y-%m-%d %H:%M", sha)
+        an, cn, trailers, date, subject, body = (meta.split("\0") + [""] * 6)[:6]
+        info.update({"mode": "commit", "sha": sha, "author": an, "authors": authors(an, cn, trailers),
+                     "date": date, "title": subject, "body": body.strip()})
 
     for f in files:
         f["add"] = sum(1 for h in f["hunks"] for l in h["lines"] if l[0] == "+")
@@ -204,6 +211,37 @@ def collect(root, rev):
     files.sort(key=lambda f: f["path"].lower())
     info["files"] = files
     return info
+
+
+def authors(an, cn, trailers):
+    """Author, Co-authored-by trailers and committer (if different), like GitHub Desktop."""
+    names = [an] + [re.sub(r"\s*<[^>]*>\s*$", "", t).strip() for t in trailers.split("\x1d")]
+    if cn != "GitHub":
+        names.append(cn)
+    out = []
+    for n in names:
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def history(skip):
+    """One page of `git log HEAD` for the History view."""
+    if not git("rev-parse", "-q", "--verify", "HEAD", check=False).strip():
+        return {"commits": [], "more": False, "unpushed": []}
+    out = git("log", "--skip=%d" % skip, "-n", str(LOG_PAGE + 1),
+              "--format=%H%x1f%an%x1f%cn%x1f%at%x1f%s%x1f" + TRAILERS + "%x1e", "HEAD")
+    commits = []
+    for rec in out.split("\x1e"):
+        f = rec.strip("\n").split("\x1f")
+        if len(f) < 6:
+            continue
+        sha, an, cn, at, subject, trailers = f[:6]
+        commits.append({"sha": sha, "subject": subject, "time": int(at or 0),
+                        "authors": authors(an, cn, trailers)})
+    # commits on HEAD that the upstream branch doesn't have yet (empty without an upstream)
+    unpushed = git("rev-list", "@{upstream}..HEAD", check=False).split()
+    return {"commits": commits[:LOG_PAGE], "more": len(commits) > LOG_PAGE, "unpushed": unpushed}
 
 
 def fingerprint():
@@ -230,6 +268,8 @@ class State:
         self.idle_since = time.time()
         self.cache = None
         self.lock = threading.Lock()
+        self.commits = {}  # sha -> json, small FIFO cache for the History view
+        self.commit_lock = threading.Lock()
 
     def data(self):
         with self.lock:
@@ -238,6 +278,17 @@ class State:
                 info["live"] = self.rev is None
                 self.cache = (self.version, json.dumps(info, ensure_ascii=False).encode("utf-8"))
             return self.cache[1]
+
+    def commit(self, sha):
+        with self.commit_lock:
+            if sha in self.commits:
+                return self.commits[sha]
+        body = json.dumps(collect(self.root, sha), ensure_ascii=False).encode("utf-8")
+        with self.commit_lock:
+            self.commits[sha] = body
+            while len(self.commits) > COMMIT_CACHE:
+                self.commits.pop(next(iter(self.commits)))
+        return body
 
     def bump(self):
         with self.cond:
@@ -265,14 +316,27 @@ def make_handler(state, port):
         def do_GET(self):
             if self.headers.get("Host") not in allowed_hosts:
                 return self.send(403, "text/plain", b"forbidden")
-            if self.path == "/":
+            url = urlsplit(self.path)
+            q = parse_qs(url.query)
+            if url.path == "/":
                 return self.send(200, "text/html; charset=utf-8", page)
-            if self.path == "/api/data":
-                try:
+            try:
+                if url.path == "/api/data":
                     return self.send(200, "application/json", state.data())
-                except RuntimeError as e:
-                    return self.send(500, "text/plain", str(e).encode())
-            if self.path == "/api/events":
+                if url.path == "/api/log":
+                    skip = q.get("skip", ["0"])[0]
+                    if not skip.isdigit():
+                        return self.send(400, "text/plain", b"bad skip")
+                    body = json.dumps(history(int(skip)), ensure_ascii=False).encode("utf-8")
+                    return self.send(200, "application/json", body)
+                if url.path == "/api/commit":
+                    sha = q.get("sha", [""])[0]
+                    if not SHA_RE.match(sha):
+                        return self.send(400, "text/plain", b"bad sha")
+                    return self.send(200, "application/json", state.commit(sha))
+            except RuntimeError as e:
+                return self.send(500, "text/plain", str(e).encode())
+            if url.path == "/api/events":
                 return self.events()
             self.send(404, "text/plain", b"not found")
 

@@ -15,6 +15,8 @@ It only *shows* changes — it never stages, commits, discards or modifies anyth
 - `+added −removed` totals per file and overall
 - Live updates: the window refreshes about a second after a file is saved, created, deleted, staged or committed
 - View a single commit or a range of revisions
+- **History** tab: browse the branch's commits (author, co-authors, age, `↑` for not-yet-pushed) and click one
+  to see its changed files and diff
 - Light and dark theme (follows the OS)
 - Keyboard navigation and a resizable sidebar
 - No dependencies beyond Python 3 and git
@@ -70,6 +72,14 @@ gdt --help
 
 `gdt` returns your terminal right away; the window runs on its own.
 
+### History
+
+Click **History** (top right) to see the commits on the current branch (`git log HEAD`), newest first, the
+same list GitHub Desktop shows. Selecting a commit shows its changed files in the middle column and the diff on the
+right. Merge commits are shown against their first parent. More commits load as you scroll. A `↑` marks commits
+that aren't on the upstream branch yet. In live mode the list refreshes when `HEAD` moves (commit, amend, checkout,
+pull).
+
 ### Keyboard shortcuts
 
 | Key | Action |
@@ -77,6 +87,8 @@ gdt --help
 | `↓` / `j` | Next file |
 | `↑` / `k` | Previous file |
 | `w` | Toggle line wrapping |
+| `Ctrl+1` / `Ctrl+2` | Changes / History tab |
+| `←` / `→` (or `h` / `l`) | History: move between the commit list and the file list |
 
 ### Closing
 

@@ -33,7 +33,16 @@ body {
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   display: flex; flex-direction: column; overflow: hidden;
 }
-header { padding: 10px 16px; border-bottom: 1px solid var(--border); flex: none; }
+header { padding: 10px 16px; border-bottom: 1px solid var(--border); flex: none; display: flex; gap: 16px; align-items: flex-start; }
+#hdr { flex: 1; min-width: 0; }
+.tabs { flex: none; display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.tabs button { font: inherit; color: var(--fg); background: var(--bg); border: 0; padding: 4px 12px; cursor: pointer; }
+.tabs button + button { border-left: 1px solid var(--border); }
+.tabs button:hover { background: var(--hover); }
+.tabs button.on { background: var(--sel); color: var(--sel-fg); }
+.tabs .badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
+  background: var(--bg2); color: var(--muted); font-size: 11px; line-height: 16px; text-align: center; }
+.tabs button.on .badge { background: rgba(255,255,255,.25); color: var(--sel-fg); }
 header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 header .body { margin-top: 6px; padding: 6px 8px; background: var(--bg2); border-radius: 4px;
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-height: 80px; overflow: auto; }
@@ -42,7 +51,23 @@ header .meta code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 header .totals { margin-left: auto; font-weight: 600; }
 .plus { color: var(--c-add); } .minus { color: var(--c-del); }
 main { flex: 1; display: grid; grid-template-columns: var(--side, 380px) 4px 1fr; min-height: 0; }
-#side { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+main.history { grid-template-columns: var(--hist, 420px) 4px var(--side, 340px) 4px 1fr; }
+#hist, #dragh { display: none; }
+main.history #hist { display: flex; } main.history #dragh { display: block; }
+#hist { border-right: 1px solid var(--border); flex-direction: column; min-height: 0; min-width: 0; }
+#hist .count { padding: 7px; text-align: center; border-bottom: 1px solid var(--border); background: var(--bg2); flex: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#commits { overflow: auto; flex: 1; outline: none; }
+.commit { padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: default; }
+.commit:hover { background: var(--hover); }
+.commit .subj { display: flex; gap: 6px; font-weight: 600; }
+.commit .subj span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.commit .up { flex: none; color: var(--c-ren); font-weight: 700; }
+.commit .by { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.commit.sel { background: var(--sel); color: var(--sel-fg); }
+.commit.sel .by, .commit.sel .up { color: var(--sel-fg); opacity: .85; }
+.more { padding: 10px; text-align: center; color: var(--muted); }
+#side { min-width: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 #side .count { padding: 7px; text-align: center; border-bottom: 1px solid var(--border); background: var(--bg2); flex: none; }
 #list { overflow: auto; flex: 1; outline: none; }
 .item { display: flex; align-items: center; gap: 8px; padding: 0 10px; height: 29px; cursor: default;
@@ -61,8 +86,8 @@ main { flex: 1; display: grid; grid-template-columns: var(--side, 380px) 4px 1fr
 .st-D { color: var(--c-del); } .st-D::after { content: "\2212"; }
 .st-R, .st-C { color: var(--c-ren); } .st-R::after, .st-C::after { content: "\2192"; }
 .item.sel .st { color: var(--sel-fg); }
-#drag { cursor: col-resize; }
-#drag:hover { background: var(--border); }
+.drag { cursor: col-resize; }
+.drag:hover { background: var(--border); }
 #pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #bar { display: flex; align-items: center; gap: 12px; padding: 7px 14px; border-bottom: 1px solid var(--border);
   background: var(--bg2); flex: none; }
@@ -87,10 +112,14 @@ tr.d mark { background: var(--del-mark); color: inherit; border-radius: 2px; }
 </style>
 </head>
 <body>
-<header id="hdr"></header>
+<header><div id="hdr"></div>
+  <div class="tabs" id="tabs"><button data-v="changes" class="on" title="Ctrl+1">Changes<span class="badge" id="nchg"></span></button><button data-v="history" title="Ctrl+2">History</button></div>
+</header>
 <main>
+  <div id="hist"><div class="count" id="hcount">History</div><div id="commits" tabindex="0"></div></div>
+  <div class="drag" id="dragh"></div>
   <div id="side"><div class="count" id="count"></div><div id="list" tabindex="0"></div></div>
-  <div id="drag"></div>
+  <div class="drag" id="drag"></div>
   <div id="pane">
     <div id="bar"><span class="path" id="path"></span><span id="ftot"></span>
       <label><input type="checkbox" id="wrap"> Wrap</label></div>
@@ -99,16 +128,25 @@ tr.d mark { background: var(--del-mark); color: inherit; border-radius: 2px; }
 </main>
 <script>
 let DATA = null, files = [], selected = 0;
+let view = "changes", COMMIT = null;               // COMMIT: data for the commit selected in History
+const lastPath = { changes: null, history: null };  // selected file per view
+const mainEl = document.querySelector("main");
 
 const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---------- header ----------
-function renderHeader() {
+function renderHeader(d) {
+  if (!d) {
+    document.getElementById("hdr").innerHTML = `<h1>No commit selected</h1>`;
+    document.getElementById("count").textContent = "";
+    return;
+  }
+  const DATA = d;
   const add = files.reduce((n, f) => n + f.add, 0), del = files.reduce((n, f) => n + f.del, 0);
   let h = `<h1>${esc(DATA.title)}</h1>`;
   if (DATA.body) h += `<div class="body">${esc(DATA.body)}</div>`;
   h += `<div class="meta">`;
-  if (DATA.mode === "commit") h += `<span>${esc(DATA.author)}</span><span>${esc(DATA.date)}</span><code>${DATA.sha.slice(0, 9)}</code>`;
+  if (DATA.mode === "commit") h += `<span>${esc((DATA.authors || [DATA.author]).join(", "))}</span><span>${esc(DATA.date)}</span><code>${DATA.sha.slice(0, 9)}</code>`;
   h += `<span>${esc(DATA.repo)}</span><span>⎇ ${esc(DATA.branch)}</span>`;
   if (DATA.live) h += `<span class="live" id="live" title="Updates automatically when files change">● Live</span>`;
   h += `<span class="totals"><span class="plus">+${add}</span> <span class="minus">−${del}</span></span></div>`;
@@ -132,8 +170,13 @@ list.innerHTML = files.map((f, i) => {
 list.addEventListener("click", e => { const it = e.target.closest(".item"); if (it) select(+it.dataset.i); });
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") return;
-  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); select(Math.min(files.length - 1, selected + 1)); }
-  if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); select(Math.max(0, selected - 1)); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === "1" || e.key === "2")) { e.preventDefault(); setView(e.key === "1" ? "changes" : "history"); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const inHist = view === "history" && document.activeElement === commitsEl;
+  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); inHist ? selectCommit(Math.min(commits.length - 1, cSel + 1)) : select(Math.min(files.length - 1, selected + 1)); }
+  if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); inHist ? selectCommit(Math.max(0, cSel - 1)) : select(Math.max(0, selected - 1)); }
+  if (view === "history" && (e.key === "ArrowRight" || e.key === "l") && inHist) { e.preventDefault(); list.focus(); }
+  if (view === "history" && (e.key === "ArrowLeft" || e.key === "h") && !inHist) { e.preventDefault(); commitsEl.focus(); }
   if (e.key === "w") { const w = document.getElementById("wrap"); w.checked = !w.checked; applyWrap(); }
 });
 
@@ -261,24 +304,122 @@ function applyWrap() { document.getElementById("diff").classList.toggle("wrap", 
 document.getElementById("wrap").addEventListener("change", applyWrap);
 
 // ---------- resizable sidebar ----------
-document.getElementById("drag").addEventListener("mousedown", e => {
-  e.preventDefault();
-  const move = ev => document.querySelector("main").style.setProperty("--side", Math.max(200, Math.min(ev.clientX, innerWidth - 300)) + "px");
-  const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
-  addEventListener("mousemove", move); addEventListener("mouseup", up);
+function resizer(handle, col, prop) {
+  handle.addEventListener("mousedown", e => {
+    e.preventDefault();
+    const left = col.getBoundingClientRect().left;
+    const move = ev => mainEl.style.setProperty(prop, Math.max(200, Math.min(ev.clientX - left, innerWidth - left - 300)) + "px");
+    const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
+    addEventListener("mousemove", move); addEventListener("mouseup", up);
+  });
+}
+resizer(document.getElementById("drag"), document.getElementById("side"), "--side");
+resizer(document.getElementById("dragh"), document.getElementById("hist"), "--hist");
+
+// ---------- views ----------
+function showData(d, prevPath, keepScroll) {
+  files = d ? d.files : [];
+  renderHeader(d);
+  renderList();
+  const i = prevPath ? files.findIndex(f => f.path === prevPath) : -1;
+  select(i >= 0 ? i : keepScroll ? Math.max(0, Math.min(selected, files.length - 1)) : 0, keepScroll && i >= 0);
+}
+function setView(v) {
+  if (v === view) return;
+  lastPath[view] = files[selected] && files[selected].path;
+  view = v;
+  mainEl.classList.toggle("history", v === "history");
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  if (v === "history") {
+    if (!histLoaded) loadHistory(true);
+    showData(COMMIT, lastPath.history);
+    commitsEl.focus();
+  } else {
+    showData(DATA, lastPath.changes);
+    list.focus();
+  }
+}
+document.getElementById("tabs").addEventListener("click", e => { const b = e.target.closest("button"); if (b) setView(b.dataset.v); });
+
+// ---------- history ----------
+const commitsEl = document.getElementById("commits");
+let commits = [], cSel = -1, histMore = false, histLoaded = false, histLoading = false, histGen = 0;
+let unpushed = new Set(), commitTimer = null, commitGen = 0;
+const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+function ago(t) {
+  const s = t - Date.now() / 1000;
+  for (const [u, n] of [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]])
+    if (Math.abs(s) >= n) return rtf.format(Math.trunc(s / n), u);
+  return "just now";
+}
+function commitHtml(c, i) {
+  const up = unpushed.has(c.sha) ? `<b class="up" title="Not pushed">↑</b>` : "";
+  return `<div class="commit${i === cSel ? " sel" : ""}" data-i="${i}" title="${esc(c.subject)}">` +
+    `<div class="subj"><span>${esc(c.subject)}</span>${up}</div>` +
+    `<div class="by">${esc(c.authors.join(", "))} • <span title="${esc(new Date(c.time * 1000).toLocaleString())}">${ago(c.time)}</span></div></div>`;
+}
+function renderCommits() {
+  commitsEl.innerHTML = commits.length
+    ? commits.map(commitHtml).join("") + (histMore ? `<div class="more">Loading…</div>` : "")
+    : `<div class="empty">No commits yet</div>`;
+}
+async function loadHistory(reset) {
+  if (!reset && (histLoading || !histMore)) return;
+  const gen = reset ? ++histGen : histGen;
+  histLoading = true;
+  try {
+    const res = await fetch(`api/log?skip=${reset ? 0 : commits.length}`, { cache: "no-store" });
+    if (!res.ok || gen !== histGen) return;
+    const j = await res.json();
+    if (gen !== histGen) return;
+    const prevSha = commits[cSel] && commits[cSel].sha;
+    commits = reset ? j.commits : commits.concat(j.commits);
+    histMore = j.more; unpushed = new Set(j.unpushed); histLoaded = true;
+    if (reset) {
+      const i = prevSha ? commits.findIndex(c => c.sha === prevSha) : -1;
+      cSel = i;
+      renderCommits();
+      if (i < 0 && commits.length) selectCommit(0, true);
+      else if (i < 0) { COMMIT = null; if (view === "history") showData(null); }
+    } else renderCommits();
+  } finally {
+    if (gen === histGen) histLoading = false;
+  }
+  if (view === "history" && commitsEl.clientHeight && commitsEl.scrollHeight <= commitsEl.clientHeight) loadHistory(false);  // fill a tall window
+}
+commitsEl.addEventListener("scroll", () => {
+  if (commitsEl.scrollTop + commitsEl.clientHeight > commitsEl.scrollHeight - 400) loadHistory(false);
 });
+commitsEl.addEventListener("click", e => { const c = e.target.closest(".commit"); if (c) selectCommit(+c.dataset.i); });
+function selectCommit(i, now) {
+  if (i < 0 || i >= commits.length) return;
+  cSel = i;
+  commitsEl.querySelectorAll(".commit.sel").forEach(e => e.classList.remove("sel"));
+  const el = commitsEl.children[i]; el.classList.add("sel"); el.scrollIntoView({ block: "nearest" });
+  const sha = commits[i].sha, gen = ++commitGen;
+  clearTimeout(commitTimer);
+  // short delay so holding ↓ doesn't diff every commit on the way
+  commitTimer = setTimeout(async () => {
+    const res = await fetch(`api/commit?sha=${sha}`);
+    if (gen !== commitGen) return;
+    if (!res.ok) { COMMIT = null; if (view === "history") { showData(null); document.getElementById("diff").innerHTML = `<div class="empty">${esc(await res.text())}</div>`; } return; }
+    const d = await res.json();
+    if (gen !== commitGen) return;
+    COMMIT = d;
+    if (view === "history") showData(COMMIT, files[selected] && files[selected].path);
+  }, now ? 0 : 120);
+}
 
 // ---------- data loading / live updates ----------
 async function refresh() {
   const res = await fetch("api/data", { cache: "no-store" });
   if (!res.ok) return;
-  const prevPath = files[selected] && files[selected].path;
+  const prevHead = DATA && DATA.head;
   DATA = await res.json();
-  files = DATA.files;
-  renderHeader();
-  renderList();
-  const i = files.findIndex(f => f.path === prevPath);
-  select(i >= 0 ? i : Math.max(0, Math.min(selected, files.length - 1)), i >= 0);
+  document.getElementById("nchg").textContent = DATA.files.length;
+  document.getElementById("hcount").textContent = `History · ⎇ ${DATA.branch}`;
+  if (view === "changes") showData(DATA, files[selected] && files[selected].path, true);
+  if (histLoaded && DATA.head !== prevHead) loadHistory(true);  // new commit, amend, checkout…
 }
 refresh().then(() => list.focus());
 const events = new EventSource("api/events");
